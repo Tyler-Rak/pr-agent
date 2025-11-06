@@ -19,6 +19,8 @@ CMD ["python", "pr_agent/servers/bitbucket_app.py"]
 
 FROM base AS bitbucket_server_webhook
 ADD pr_agent pr_agent
+# Set Azure DevOps cache directory to writable location
+ENV AZURE_DEVOPS_CACHE_DIR=/tmp/.azure-devops
 CMD ["python", "pr_agent/servers/bitbucket_server_webhook.py"]
 
 FROM base AS github_polling
