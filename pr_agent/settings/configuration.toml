@@ -326,6 +326,8 @@ avoid_full_files = false
 # URL to the BitBucket Server instance
 # url = "https://git.bitbucket.com"
 url = ""
+# Use git clone to fetch file contents instead of REST API (bypasses rate limits)
+use_git_clone_for_files = false
 pr_commands = [
     "/describe --pr_description.final_update_message=false",
     "/review",

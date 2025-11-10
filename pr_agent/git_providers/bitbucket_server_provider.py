@@ -1,5 +1,6 @@
 import difflib
 import re
+from tempfile import TemporaryDirectory
 
 from packaging.version import parse as parse_version
 from typing import Optional, Tuple
@@ -214,6 +215,39 @@ class BitbucketServerProvider(GitProvider):
         diffstat = [change["path"]['toString'] for change in changes]
         return diffstat
 
+    def get_file_from_git(self, path: str, commit_id: str, repo_path: str) -> str:
+        """
+        Read file content from local git repository using git show command.
+        This bypasses REST API calls and avoids rate limiting.
+
+        Args:
+            path: File path relative to repo root
+            commit_id: Commit SHA to read file at
+            repo_path: Path to cloned repository
+
+        Returns:
+            File content as string, empty string if file not found
+        """
+        try:
+            result = subprocess.run(
+                ['git', 'show', f'{commit_id}:{path}'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                return result.stdout
+            else:
+                get_logger().debug(f"File {path} not found at commit {commit_id}: {result.stderr}")
+                return ""
+        except subprocess.TimeoutExpired:
+            get_logger().warning(f"Timeout reading {path} from git at commit {commit_id}")
+            return ""
+        except Exception as e:
+            get_logger().debug(f"Failed to read {path} from git: {e}")
+            return ""
+
     #gets the best common ancestor: https://git-scm.com/docs/git-merge-base
     @staticmethod
     def get_best_common_ancestor(source_commits_list, destination_commits_list, guaranteed_common_ancestor) -> str:
@@ -230,6 +264,11 @@ class BitbucketServerProvider(GitProvider):
         if self.diff_files:
             return self.diff_files
 
+        # Custom: Use git clone mode if enabled (bypasses rate limits)
+        if get_settings().get("bitbucket_server.use_git_clone_for_files", False):
+            return self._get_diff_files_with_git_clone()
+
+        # Original code continues below (unchanged for easier upstream merges)
         head_sha = self.pr.fromRef['latestCommit']
 
         # if Bitbucket api version is >= 8.16 then use the merge-base api for 2-way diff calculation
@@ -305,6 +344,115 @@ class BitbucketServerProvider(GitProvider):
 
         self.diff_files = diff_files
         return diff_files
+
+    def _get_diff_files_with_git_clone(self) -> list[FilePatchInfo]:
+        """Fetch file contents using git clone instead of REST API to bypass rate limits"""
+        # Get repo clone URL
+        try:
+            clone_links = self.pr.toRef['repository']['links']['clone']
+            repo_url = None
+            for link in clone_links:
+                if link.get('name') == 'http':
+                    repo_url = link.get('href')
+                    break
+            if not repo_url:
+                repo_url = clone_links[0]['href']
+        except (KeyError, IndexError) as e:
+            get_logger().warning(f"Failed to get clone URL from PR, falling back to API mode: {e}")
+            return self._get_diff_files_with_api()
+
+        get_logger().info(f"Cloning repository: {repo_url}")
+
+        with TemporaryDirectory() as tmp_dir:
+            try:
+                cloned_repo = self.clone(repo_url, tmp_dir, remove_dest_folder=False)
+                if not cloned_repo:
+                    get_logger().warning("Git clone failed, falling back to API mode")
+                    return self._get_diff_files_with_api()
+
+                repo_path = cloned_repo.path
+                get_logger().info(f"Repository cloned successfully to {repo_path}")
+
+                # Now use the same logic as API mode but with git file fetching
+                head_sha = self.pr.fromRef['latestCommit']
+
+                # if Bitbucket api version is >= 8.16 then use the merge-base api for 2-way diff calculation
+                if self.bitbucket_api_version is not None and self.bitbucket_api_version >= parse_version("8.16"):
+                    try:
+                        base_sha = self.bitbucket_client.get(self._get_merge_base())['id']
+                    except Exception as e:
+                        get_logger().error(f"Failed to get the best common ancestor for PR: {self.pr_url}, \nerror: {e}")
+                        raise e
+                else:
+                    source_commits_list = list(self.bitbucket_client.get_pull_requests_commits(
+                        self.workspace_slug,
+                        self.repo_slug,
+                        self.pr_num
+                    ))
+                    # if Bitbucket api version is None or < 7.0 then do a simple diff with a guaranteed common ancestor
+                    base_sha = source_commits_list[-1]['parents'][0]['id']
+                    # if Bitbucket api version is 7.0-8.15 then use 2-way diff functionality for the base_sha
+                    if self.bitbucket_api_version is not None and self.bitbucket_api_version >= parse_version("7.0"):
+                        try:
+                            destination_commits = list(
+                                self.bitbucket_client.get_commits(self.workspace_slug, self.repo_slug, base_sha,
+                                                                  self.pr.toRef['latestCommit']))
+                            base_sha = self.get_best_common_ancestor(source_commits_list, destination_commits, base_sha)
+                        except Exception as e:
+                            get_logger().error(
+                                f"Failed to get the commit list for calculating best common ancestor for PR: {self.pr_url}, \nerror: {e}")
+                            raise e
+
+                diff_files = []
+                original_file_content_str = ""
+                new_file_content_str = ""
+
+                changes_original = list(self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num))
+                changes = filter_ignored(changes_original, 'bitbucket_server')
+                for change in changes:
+                    file_path = change['path']['toString']
+                    if not is_valid_file(file_path.split("/")[-1]):
+                        get_logger().info(f"Skipping a non-code file: {file_path}")
+                        continue
+
+                    match change['type']:
+                        case 'ADD':
+                            edit_type = EDIT_TYPE.ADDED
+                            new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
+                            new_file_content_str = decode_if_bytes(new_file_content_str)
+                            original_file_content_str = ""
+                        case 'DELETE':
+                            edit_type = EDIT_TYPE.DELETED
+                            new_file_content_str = ""
+                            original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
+                            original_file_content_str = decode_if_bytes(original_file_content_str)
+                        case 'RENAME':
+                            edit_type = EDIT_TYPE.RENAMED
+                        case _:
+                            edit_type = EDIT_TYPE.MODIFIED
+                            original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
+                            original_file_content_str = decode_if_bytes(original_file_content_str)
+                            new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
+                            new_file_content_str = decode_if_bytes(new_file_content_str)
+
+                    patch = load_large_diff(file_path, new_file_content_str, original_file_content_str, show_warning=False)
+
+                    diff_files.append(
+                        FilePatchInfo(
+                            original_file_content_str,
+                            new_file_content_str,
+                            patch,
+                            file_path,
+                            edit_type=edit_type,
+                        )
+                    )
+
+                self.diff_files = diff_files
+                return diff_files
+
+            except Exception as e:
+                get_logger().warning(f"Git clone mode failed: {e}, falling back to API mode")
+                return self._get_diff_files_with_api()
 
     def publish_comment(self, pr_comment: str, is_temporary: bool = False):
         if not is_temporary:
