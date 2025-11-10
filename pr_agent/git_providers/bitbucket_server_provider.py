@@ -358,101 +358,96 @@ class BitbucketServerProvider(GitProvider):
             if not repo_url:
                 repo_url = clone_links[0]['href']
         except (KeyError, IndexError) as e:
-            get_logger().warning(f"Failed to get clone URL from PR, falling back to API mode: {e}")
-            return self._get_diff_files_with_api()
+            get_logger().error(f"Failed to get clone URL from PR metadata: {e}")
+            raise RuntimeError(f"Git clone mode enabled but cannot get clone URL from PR: {e}")
 
         get_logger().info(f"Cloning repository: {repo_url}")
 
         with TemporaryDirectory() as tmp_dir:
-            try:
-                cloned_repo = self.clone(repo_url, tmp_dir, remove_dest_folder=False)
-                if not cloned_repo:
-                    get_logger().warning("Git clone failed, falling back to API mode")
-                    return self._get_diff_files_with_api()
+            cloned_repo = self.clone(repo_url, tmp_dir, remove_dest_folder=False)
+            if not cloned_repo:
+                get_logger().error("Git clone failed")
+                raise RuntimeError(f"Git clone mode enabled but clone failed for repo: {repo_url}")
 
-                repo_path = cloned_repo.path
-                get_logger().info(f"Repository cloned successfully to {repo_path}")
+            repo_path = cloned_repo.path
+            get_logger().info(f"Repository cloned successfully to {repo_path}")
 
-                # Now use the same logic as API mode but with git file fetching
-                head_sha = self.pr.fromRef['latestCommit']
+            # Now use the same logic as API mode but with git file fetching
+            head_sha = self.pr.fromRef['latestCommit']
 
-                # if Bitbucket api version is >= 8.16 then use the merge-base api for 2-way diff calculation
-                if self.bitbucket_api_version is not None and self.bitbucket_api_version >= parse_version("8.16"):
+            # if Bitbucket api version is >= 8.16 then use the merge-base api for 2-way diff calculation
+            if self.bitbucket_api_version is not None and self.bitbucket_api_version >= parse_version("8.16"):
+                try:
+                    base_sha = self.bitbucket_client.get(self._get_merge_base())['id']
+                except Exception as e:
+                    get_logger().error(f"Failed to get the best common ancestor for PR: {self.pr_url}, \nerror: {e}")
+                    raise e
+            else:
+                source_commits_list = list(self.bitbucket_client.get_pull_requests_commits(
+                    self.workspace_slug,
+                    self.repo_slug,
+                    self.pr_num
+                ))
+                # if Bitbucket api version is None or < 7.0 then do a simple diff with a guaranteed common ancestor
+                base_sha = source_commits_list[-1]['parents'][0]['id']
+                # if Bitbucket api version is 7.0-8.15 then use 2-way diff functionality for the base_sha
+                if self.bitbucket_api_version is not None and self.bitbucket_api_version >= parse_version("7.0"):
                     try:
-                        base_sha = self.bitbucket_client.get(self._get_merge_base())['id']
+                        destination_commits = list(
+                            self.bitbucket_client.get_commits(self.workspace_slug, self.repo_slug, base_sha,
+                                                              self.pr.toRef['latestCommit']))
+                        base_sha = self.get_best_common_ancestor(source_commits_list, destination_commits, base_sha)
                     except Exception as e:
-                        get_logger().error(f"Failed to get the best common ancestor for PR: {self.pr_url}, \nerror: {e}")
+                        get_logger().error(
+                            f"Failed to get the commit list for calculating best common ancestor for PR: {self.pr_url}, \nerror: {e}")
                         raise e
-                else:
-                    source_commits_list = list(self.bitbucket_client.get_pull_requests_commits(
-                        self.workspace_slug,
-                        self.repo_slug,
-                        self.pr_num
-                    ))
-                    # if Bitbucket api version is None or < 7.0 then do a simple diff with a guaranteed common ancestor
-                    base_sha = source_commits_list[-1]['parents'][0]['id']
-                    # if Bitbucket api version is 7.0-8.15 then use 2-way diff functionality for the base_sha
-                    if self.bitbucket_api_version is not None and self.bitbucket_api_version >= parse_version("7.0"):
-                        try:
-                            destination_commits = list(
-                                self.bitbucket_client.get_commits(self.workspace_slug, self.repo_slug, base_sha,
-                                                                  self.pr.toRef['latestCommit']))
-                            base_sha = self.get_best_common_ancestor(source_commits_list, destination_commits, base_sha)
-                        except Exception as e:
-                            get_logger().error(
-                                f"Failed to get the commit list for calculating best common ancestor for PR: {self.pr_url}, \nerror: {e}")
-                            raise e
 
-                diff_files = []
-                original_file_content_str = ""
-                new_file_content_str = ""
+            diff_files = []
+            original_file_content_str = ""
+            new_file_content_str = ""
 
-                changes_original = list(self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num))
-                changes = filter_ignored(changes_original, 'bitbucket_server')
-                for change in changes:
-                    file_path = change['path']['toString']
-                    if not is_valid_file(file_path.split("/")[-1]):
-                        get_logger().info(f"Skipping a non-code file: {file_path}")
-                        continue
+            changes_original = list(self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num))
+            changes = filter_ignored(changes_original, 'bitbucket_server')
+            for change in changes:
+                file_path = change['path']['toString']
+                if not is_valid_file(file_path.split("/")[-1]):
+                    get_logger().info(f"Skipping a non-code file: {file_path}")
+                    continue
 
-                    match change['type']:
-                        case 'ADD':
-                            edit_type = EDIT_TYPE.ADDED
-                            new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
-                            new_file_content_str = decode_if_bytes(new_file_content_str)
-                            original_file_content_str = ""
-                        case 'DELETE':
-                            edit_type = EDIT_TYPE.DELETED
-                            new_file_content_str = ""
-                            original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
-                            original_file_content_str = decode_if_bytes(original_file_content_str)
-                        case 'RENAME':
-                            edit_type = EDIT_TYPE.RENAMED
-                        case _:
-                            edit_type = EDIT_TYPE.MODIFIED
-                            original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
-                            original_file_content_str = decode_if_bytes(original_file_content_str)
-                            new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
-                            new_file_content_str = decode_if_bytes(new_file_content_str)
+                match change['type']:
+                    case 'ADD':
+                        edit_type = EDIT_TYPE.ADDED
+                        new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
+                        new_file_content_str = decode_if_bytes(new_file_content_str)
+                        original_file_content_str = ""
+                    case 'DELETE':
+                        edit_type = EDIT_TYPE.DELETED
+                        new_file_content_str = ""
+                        original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
+                        original_file_content_str = decode_if_bytes(original_file_content_str)
+                    case 'RENAME':
+                        edit_type = EDIT_TYPE.RENAMED
+                    case _:
+                        edit_type = EDIT_TYPE.MODIFIED
+                        original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
+                        original_file_content_str = decode_if_bytes(original_file_content_str)
+                        new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
+                        new_file_content_str = decode_if_bytes(new_file_content_str)
 
-                    patch = load_large_diff(file_path, new_file_content_str, original_file_content_str, show_warning=False)
+                patch = load_large_diff(file_path, new_file_content_str, original_file_content_str, show_warning=False)
 
-                    diff_files.append(
-                        FilePatchInfo(
-                            original_file_content_str,
-                            new_file_content_str,
-                            patch,
-                            file_path,
-                            edit_type=edit_type,
-                        )
+                diff_files.append(
+                    FilePatchInfo(
+                        original_file_content_str,
+                        new_file_content_str,
+                        patch,
+                        file_path,
+                        edit_type=edit_type,
                     )
+                )
 
-                self.diff_files = diff_files
-                return diff_files
-
-            except Exception as e:
-                get_logger().warning(f"Git clone mode failed: {e}, falling back to API mode")
-                return self._get_diff_files_with_api()
+            self.diff_files = diff_files
+            return diff_files
 
     def publish_comment(self, pr_comment: str, is_temporary: bool = False):
         if not is_temporary:
@@ -688,7 +683,8 @@ class BitbucketServerProvider(GitProvider):
         return f"rest/api/latest/projects/{self.workspace_slug}/repos/{self.repo_slug}/pull-requests/{self.pr_num}/merge-base"
     # Clone related
     def _prepare_clone_url_with_token(self, repo_url_to_clone: str) -> str | None:
-        if 'bitbucket.' not in repo_url_to_clone:
+        # Accept both bitbucket.com and custom Bitbucket Server domains with /scm/ path
+        if 'bitbucket' not in repo_url_to_clone.lower() and '/scm/' not in repo_url_to_clone:
             get_logger().error("Repo URL is not a valid bitbucket URL.")
             return None
         bearer_token = self.bearer_token
