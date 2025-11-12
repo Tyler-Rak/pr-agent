@@ -1,4 +1,6 @@
+import asyncio
 import ast
+import copy
 import json
 import os
 import re
@@ -24,6 +26,9 @@ from pr_agent.servers.utils import verify_signature
 
 setup_logger(fmt=LoggingFormat.JSON, level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
 router = APIRouter()
+
+# Global semaphore for limiting concurrent reviews
+review_semaphore = None
 
 
 def handle_request(
@@ -194,6 +199,118 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
             get_logger().error(f"Failed to handle webhook: {e}")
 
     background_tasks.add_task(inner)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "success"})
+    )
+
+
+@router.post("/webhook-parallel")
+async def handle_webhook_parallel(request: Request):
+    """
+    Parallel webhook handler for concurrent PR review processing.
+    Uses asyncio.create_task() for true parallel execution with semaphore-based concurrency limiting.
+    """
+    global review_semaphore
+
+    log_context = {"server_type": "bitbucket_server", "parallel": True}
+    data = await request.json()
+    get_logger().info(json.dumps(data))
+
+    # Check if parallel reviews are enabled
+    enable_parallel = get_settings().get("BITBUCKET_APP.ENABLE_PARALLEL_REVIEWS", False)
+    if not enable_parallel:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=jsonable_encoder({"error": "Parallel reviews not enabled. Set bitbucket_app.enable_parallel_reviews=true in configuration."})
+        )
+
+    # Initialize semaphore if not already done
+    if review_semaphore is None:
+        max_concurrent = get_settings().get("BITBUCKET_APP.MAX_CONCURRENT_REVIEWS", 5)
+        if max_concurrent > 0:
+            review_semaphore = asyncio.Semaphore(max_concurrent)
+            get_logger().info(f"Initialized review semaphore with max_concurrent_reviews={max_concurrent}")
+
+    # Webhook signature verification
+    webhook_secret = get_settings().get("BITBUCKET_SERVER.WEBHOOK_SECRET", None)
+    if webhook_secret:
+        body_bytes = await request.body()
+        if body_bytes.decode('utf-8') == '{"test": true}':
+            return JSONResponse(
+                status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "connection test successful"})
+            )
+        signature_header = request.headers.get("x-hub-signature", None)
+        verify_signature(body_bytes, webhook_secret, signature_header)
+
+    pr_id = data["pullRequest"]["id"]
+    repository_name = data["pullRequest"]["toRef"]["repository"]["slug"]
+    project_name = data["pullRequest"]["toRef"]["repository"]["project"]["key"]
+    bitbucket_server = get_settings().get("BITBUCKET_SERVER.URL")
+    pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
+
+    log_context["api_url"] = pr_url
+    log_context["event"] = "pull_request"
+
+    commands_to_run = []
+
+    if (data["eventKey"] == "pr:opened"
+            or (data["eventKey"] == "repo:refs_changed" and data.get("pullRequest", {}).get("id", -1) != -1)):
+        apply_repo_settings(pr_url)
+        if not should_process_pr_logic(data):
+            get_logger().info(f"PR ignored due to config settings", **log_context)
+            return JSONResponse(
+                status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "PR ignored by config"})
+            )
+        if get_settings().config.disable_auto_feedback:
+            get_logger().info(f"Auto feedback is disabled, skipping auto commands for PR {pr_url}", **log_context)
+            return JSONResponse(
+                status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "PR ignored due to auto feedback not enabled"})
+            )
+        get_settings().set("config.is_auto_command", True)
+        if data["eventKey"] == "pr:opened":
+            commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PR_COMMANDS'))
+        else:
+            if not get_settings().get("BITBUCKET_SERVER.HANDLE_PUSH_TRIGGER"):
+                get_logger().info(f"Push trigger is disabled, skipping push commands for PR {pr_url}", **log_context)
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "PR ignored due to push trigger not enabled"})
+                )
+            get_settings().set("config.is_new_pr", False)
+            commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PUSH_COMMANDS'))
+    elif data["eventKey"] == "pr:comment:added":
+        comment_text = data["comment"]["text"].strip()
+        # Check if comment is /inspect (trigger all 3 commands)
+        if comment_text == "/inspect":
+            get_logger().info("/inspect command detected, expanding to all commands")
+            commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PR_COMMANDS'))
+        else:
+            commands_to_run.append(comment_text)
+    else:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=json.dumps({"message": "Unsupported event"}),
+        )
+
+    # Create isolated copies for this task
+    commands_copy = copy.deepcopy(commands_to_run)
+    log_context_copy = copy.deepcopy(log_context)
+
+    async def inner_parallel():
+        """Inner function that runs the commands with semaphore control"""
+        try:
+            if review_semaphore:
+                async with review_semaphore:
+                    get_logger().info(f"Starting parallel review for {pr_url}", **log_context_copy)
+                    await _run_commands_sequentially(commands_copy, pr_url, log_context_copy)
+            else:
+                get_logger().info(f"Starting parallel review (no semaphore) for {pr_url}", **log_context_copy)
+                await _run_commands_sequentially(commands_copy, pr_url, log_context_copy)
+        except Exception as e:
+            get_logger().error(f"Failed to handle webhook in parallel: {e}", **log_context_copy)
+
+    # Use asyncio.create_task for true concurrent execution
+    asyncio.create_task(inner_parallel())
 
     return JSONResponse(
         status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "success"})
