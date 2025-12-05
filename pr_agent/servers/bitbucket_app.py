@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import copy
 import hashlib
@@ -306,6 +307,130 @@ async def handle_github_webhooks(background_tasks: BackgroundTasks, request: Req
             get_logger().error(f"Failed to handle webhook: {e}")
     background_tasks.add_task(inner)
     return "OK"
+
+@router.post("/webhook-parallel")
+async def handle_github_webhooks_parallel(request: Request):
+    """
+    Parallel webhook handler for concurrent PR review processing.
+    This endpoint supports processing multiple PRs concurrently instead of sequentially.
+    Enable via bitbucket_app.enable_parallel_reviews configuration.
+    """
+    # Check if parallel reviews are enabled
+    enable_parallel = get_settings().get("bitbucket_app.enable_parallel_reviews", False)
+    if not enable_parallel:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Parallel reviews not enabled. Set bitbucket_app.enable_parallel_reviews=true in configuration."}
+        )
+
+    app_name = get_settings().get("CONFIG.APP_NAME", "Unknown")
+    log_context = {"server_type": "bitbucket_app", "app_name": app_name}
+    get_logger().debug(request.headers)
+    jwt_header = request.headers.get("authorization", None)
+    if jwt_header:
+        input_jwt = jwt_header.split(" ")[1]
+    data = await request.json()
+    get_logger().debug(data)
+
+    # Extract context data BEFORE creating inner function to ensure isolation
+    jwt_parts = input_jwt.split(".")
+    claim_part = jwt_parts[1]
+    claim_part += "=" * (-len(claim_part) % 4)
+    decoded_claims = base64.urlsafe_b64decode(claim_part)
+    claims = json.loads(decoded_claims)
+    client_key = claims["iss"]
+    secrets = json.loads(secret_provider.get_secret(client_key))
+    shared_secret = secrets["shared_secret"]
+
+    # Validate JWT
+    jwt.decode(input_jwt, shared_secret, audience=client_key, algorithms=["HS256"])
+
+    # Get bearer token and deep copy settings before spawning task
+    bearer_token = await get_bearer_token(shared_secret, client_key)
+    task_settings = copy.deepcopy(global_settings)
+
+    # Get semaphore for concurrency limiting
+    max_concurrent = get_settings().get("bitbucket_app.max_concurrent_reviews", 5)
+    if max_concurrent <= 0:
+        semaphore = None
+    else:
+        if not hasattr(handle_github_webhooks_parallel, '_semaphore'):
+            handle_github_webhooks_parallel._semaphore = asyncio.Semaphore(max_concurrent)
+        semaphore = handle_github_webhooks_parallel._semaphore
+
+    async def inner_parallel(bearer_token_copy: str, settings_copy: dict, data_copy: dict):
+        """Inner function with isolated context for concurrent execution"""
+        try:
+            # Apply semaphore if configured
+            if semaphore:
+                async with semaphore:
+                    await process_webhook(bearer_token_copy, settings_copy, data_copy, log_context)
+            else:
+                await process_webhook(bearer_token_copy, settings_copy, data_copy, log_context)
+        except Exception as e:
+            get_logger().error(f"Failed to handle webhook (parallel): {e}")
+
+    # Create task with isolated context - this runs concurrently
+    asyncio.create_task(inner_parallel(bearer_token, task_settings, data))
+    return "OK"
+
+async def process_webhook(bearer_token: str, settings: dict, data: dict, log_context: dict):
+    """
+    Process webhook with isolated context for concurrent execution.
+    This function is called by both sequential and parallel handlers.
+    """
+    # ignore bot users
+    if is_bot_user(data):
+        return "OK"
+
+    # Check if the PR should be processed
+    if data.get("event", "") == "pullrequest:created":
+        if not should_process_pr_logic(data):
+            return "OK"
+
+    # Get the username of the sender
+    log_context["sender"] = _get_username(data)
+
+    sender_id = data.get("data", {}).get("actor", {}).get("account_id", "")
+    log_context["sender_id"] = sender_id
+
+    # Create isolated context for this task
+    task_context = copy.copy(context)
+    task_context['bitbucket_bearer_token'] = bearer_token
+    task_context["settings"] = settings
+
+    event = data["event"]
+    agent = PRAgent()
+
+    if event == "pullrequest:created":
+        pr_url = data["data"]["pullrequest"]["links"]["html"]["href"]
+        log_context["api_url"] = pr_url
+        log_context["event"] = "pull_request"
+        if pr_url:
+            with get_logger().contextualize(**log_context):
+                if get_identity_provider().verify_eligibility("bitbucket",
+                                                sender_id, pr_url) is not Eligibility.NOT_ELIGIBLE:
+                    if get_settings().get("bitbucket_app.pr_commands"):
+                        await _perform_commands_bitbucket("pr_commands", agent, pr_url, log_context, data)
+    elif event == "pullrequest:updated":
+        pr_url = data["data"]["pullrequest"]["links"]["html"]["href"]
+        log_context["api_url"] = pr_url
+        log_context["event"] = "pull_request"
+        if pr_url:
+            with get_logger().contextualize(**log_context):
+                if get_identity_provider().verify_eligibility("bitbucket",
+                                                sender_id, pr_url) is not Eligibility.NOT_ELIGIBLE:
+                    if get_settings().get("bitbucket_app.push_commands"):
+                        await _perform_commands_bitbucket("push_commands", agent, pr_url, log_context, data)
+    elif event == "pullrequest:comment_created":
+        pr_url = data["data"]["pullrequest"]["links"]["html"]["href"]
+        log_context["api_url"] = pr_url
+        log_context["event"] = "comment"
+        comment_body = data["data"]["comment"]["content"]["raw"]
+        with get_logger().contextualize(**log_context):
+            if get_identity_provider().verify_eligibility("bitbucket",
+                                                             sender_id, pr_url) is not Eligibility.NOT_ELIGIBLE:
+                await agent.handle_request(pr_url, comment_body)
 
 @router.get("/webhook")
 async def handle_github_webhooks(request: Request, response: Response):

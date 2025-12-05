@@ -13,5 +13,6 @@ build/
 docs/.cache/
 .qodo
 poetry.lock
+uv.lock
 .claude/
 CLAUDE.md

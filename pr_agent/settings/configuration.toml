@@ -306,6 +306,9 @@ pr_commands = [
     "/improve --pr_code_suggestions.commitable_code_suggestions=true",
 ]
 avoid_full_files = false
+# Parallel review processing settings
+enable_parallel_reviews = false  # Set to true to enable concurrent PR review processing
+max_concurrent_reviews = 5  # Maximum number of concurrent reviews (0 = unlimited)
 
 [local]
 # LocalGitProvider settings - uncomment to use paths other than default
@@ -326,6 +329,8 @@ avoid_full_files = false
 # URL to the BitBucket Server instance
 # url = "https://git.bitbucket.com"
 url = ""
+# Use git clone to fetch file contents instead of REST API (bypasses rate limits)
+use_git_clone_for_files = false
 pr_commands = [
     "/describe --pr_description.final_update_message=false",
     "/review",

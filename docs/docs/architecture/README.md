@@ -10,8 +10,8 @@ This folder contains architectural documentation and diagrams for understanding 
 - **[class-diagrams.md](class-diagrams.md)** - Class structure and relationships
 - **[data-flow.md](data-flow.md)** - Data flow and processing pipelines
 
-### Specific Topics
-- **[bitbucket-rate-limiting.md](bitbucket-rate-limiting.md)** - Bitbucket Server rate limiting issue analysis
+### Feature-Specific Architecture
+- **[parallel-review-architecture.md](parallel-review-architecture.md)** - Parallel PR review feature
 
 ## Quick Links
 
