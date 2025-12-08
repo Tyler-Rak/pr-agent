@@ -18,6 +18,7 @@ verbosity_level=0 # 0,1,2
 use_extra_bad_extensions=false
 # Log
 log_level="DEBUG"
+log_file=""  # Optional: Path to log file for external log aggregation (e.g., "/var/log/python/pr-agent.log"). Can also be set via LOG_FILE env var. Logs go to stdout by default.
 # Configurations
 use_wiki_settings_file=true
 use_repo_settings_file=true

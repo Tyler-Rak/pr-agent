@@ -46,6 +46,20 @@ def setup_logger(level: str = "INFO", fmt: LoggingFormat = LoggingFormat.CONSOLE
         logger.remove(None)
         logger.add(sys.stdout, level=level, colorize=True, filter=inv_analytics_filter)
 
+    # Optional file logging for all logs (useful for log aggregation systems like logstash)
+    # Format: timestamp level [module] message (compatible with traditional log parsers)
+    log_file_path = get_settings().get("CONFIG.LOG_FILE", "") or os.getenv("LOG_FILE", "")
+    if log_file_path:
+        logger.add(
+            log_file_path,
+            filter=inv_analytics_filter,  # Exclude analytics events (already logged separately if analytics_folder is set)
+            level=level,
+            format="{time:YYYY-MM-DD HH:mm:ss} {level: <8} [{name}] {message}",
+            colorize=False,
+            enqueue=True,  # Async writing for better performance
+            # Note: rotation/retention not configured - use external logrotate instead
+        )
+
     log_folder = get_settings().get("CONFIG.ANALYTICS_FOLDER", "")
     if log_folder:
         pid = os.getpid()
