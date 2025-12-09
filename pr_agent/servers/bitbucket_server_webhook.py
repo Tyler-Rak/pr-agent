@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import time
 from typing import List
 
 import uvicorn
@@ -29,6 +30,10 @@ router = APIRouter()
 
 # Global semaphore for limiting concurrent reviews
 review_semaphore = None
+
+# Task tracking for queue monitoring
+active_review_tasks = {}
+active_review_tasks_lock = asyncio.Lock()
 
 
 def handle_request(
@@ -155,7 +160,7 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
     log_context["api_url"] = pr_url
-    log_context["event"] = "pull_request"
+    log_context["webhook_event_type"] = "pull_request"
 
     commands_to_run = []
 
@@ -250,7 +255,7 @@ async def handle_webhook_parallel(request: Request):
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
     log_context["api_url"] = pr_url
-    log_context["event"] = "pull_request"
+    log_context["webhook_event_type"] = "pull_request"
 
     commands_to_run = []
 
@@ -298,16 +303,88 @@ async def handle_webhook_parallel(request: Request):
 
     async def inner_parallel():
         """Inner function that runs the commands with semaphore control"""
+        task_id = id(asyncio.current_task())
+        start_time = time.time()
+
         try:
+            # Register task
+            async with active_review_tasks_lock:
+                active_review_tasks[task_id] = {
+                    "pr_url": pr_url,
+                    "created_at": start_time,
+                    "status": "waiting",
+                    "wait_start": start_time,
+                }
+                queue_depth = len(active_review_tasks)
+
+            get_logger().info(
+                "Review task created",
+                event="review_task_created",
+                task_id=task_id,
+                pr_url=pr_url,
+                queue_depth=queue_depth,
+                **log_context_copy
+            )
+
             if review_semaphore:
+                wait_start = time.time()
+
                 async with review_semaphore:
-                    get_logger().info(f"Starting parallel review for {pr_url}", **log_context_copy)
+                    wait_time = time.time() - wait_start
+
+                    # Update status and get counts
+                    async with active_review_tasks_lock:
+                        active_review_tasks[task_id]["status"] = "processing"
+                        active_review_tasks[task_id]["processing_start"] = time.time()
+                        active_tasks = len([t for t in active_review_tasks.values() if t["status"] == "processing"])
+                        waiting_tasks = len([t for t in active_review_tasks.values() if t["status"] == "waiting"])
+
+                    get_logger().info(
+                        "Review task processing",
+                        event="review_task_processing",
+                        task_id=task_id,
+                        pr_url=pr_url,
+                        wait_time_seconds=round(wait_time, 2),
+                        active_reviews=active_tasks,
+                        waiting_reviews=waiting_tasks,
+                        **log_context_copy
+                    )
+
                     await _run_commands_sequentially(commands_copy, pr_url, log_context_copy)
             else:
                 get_logger().info(f"Starting parallel review (no semaphore) for {pr_url}", **log_context_copy)
                 await _run_commands_sequentially(commands_copy, pr_url, log_context_copy)
+
         except Exception as e:
-            get_logger().error(f"Failed to handle webhook in parallel: {e}", **log_context_copy)
+            async with active_review_tasks_lock:
+                if task_id in active_review_tasks:
+                    active_review_tasks[task_id]["status"] = "failed"
+            get_logger().error(
+                "Review task failed",
+                event="review_task_failed",
+                task_id=task_id,
+                pr_url=pr_url,
+                error=str(e),
+                **log_context_copy
+            )
+        finally:
+            # Cleanup and log completion
+            duration = time.time() - start_time
+            async with active_review_tasks_lock:
+                status = active_review_tasks.get(task_id, {}).get("status", "unknown")
+                active_review_tasks.pop(task_id, None)
+                remaining_tasks = len(active_review_tasks)
+
+            get_logger().info(
+                "Review task completed",
+                event="review_task_completed",
+                task_id=task_id,
+                pr_url=pr_url,
+                duration_seconds=round(duration, 2),
+                status=status,
+                remaining_tasks=remaining_tasks,
+                **log_context_copy
+            )
 
     # Use asyncio.create_task for true concurrent execution
     asyncio.create_task(inner_parallel())
