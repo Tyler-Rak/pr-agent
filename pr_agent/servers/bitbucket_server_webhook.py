@@ -289,8 +289,15 @@ async def handle_webhook_parallel(request: Request):
         if comment_text == "/inspect":
             get_logger().info("/inspect command detected, expanding to all commands")
             commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PR_COMMANDS'))
-        else:
+        elif comment_text.startswith("/"):
             commands_to_run.append(comment_text)
+        else:
+            # Not a command, ignore
+            get_logger().info(f"Ignoring non-command comment: {comment_text[:50]}...", **log_context)
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=jsonable_encoder({"message": "Comment ignored (not a command)"})
+            )
     else:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
