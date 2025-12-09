@@ -64,7 +64,7 @@ class PRAddDocs:
                 get_logger().info('Pushing PR documentation...')
                 self.git_provider.remove_initial_comment()
                 get_logger().info('Pushing inline code documentation...')
-                self.push_inline_docs(data)
+                await self.push_inline_docs(data)
         except Exception as e:
             get_logger().error(f"Failed to generate code documentation for PR, error: {e}")
 
@@ -101,7 +101,7 @@ class PRAddDocs:
             data = {'Code Documentation': data}
         return data
 
-    def push_inline_docs(self, data):
+    async def push_inline_docs(self, data):
         docs = []
 
         if not data['Code Documentation']:
@@ -116,7 +116,7 @@ class PRAddDocs:
                 documentation = d['documentation']
                 doc_placement = d['doc placement'].strip()
                 if documentation:
-                    new_code_snippet = self.dedent_code(relevant_file, relevant_line, documentation, doc_placement,
+                    new_code_snippet = await self.dedent_code(relevant_file, relevant_line, documentation, doc_placement,
                                                         add_original_line=True)
 
                     body = f"**Suggestion:** Proposed documentation\n```suggestion\n" + new_code_snippet + "\n```"
@@ -133,11 +133,13 @@ class PRAddDocs:
             for doc_suggestion in docs:
                 self.git_provider.publish_code_suggestions([doc_suggestion])
 
-    def dedent_code(self, relevant_file, relevant_lines_start, new_code_snippet, doc_placement='after',
+    async def dedent_code(self, relevant_file, relevant_lines_start, new_code_snippet, doc_placement='after',
                     add_original_line=False):
         try:  # dedent code snippet
-            self.diff_files = self.git_provider.diff_files if self.git_provider.diff_files \
-                else self.git_provider.get_diff_files()
+            if self.git_provider.diff_files:
+                self.diff_files = self.git_provider.diff_files
+            else:
+                self.diff_files = await self.git_provider.get_diff_files()
             original_initial_line = None
             for file in self.diff_files:
                 if file.filename.strip() == relevant_file:

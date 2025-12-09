@@ -72,7 +72,7 @@ class PRDescription:
             "custom_labels_class": "",  # will be filled if necessary in 'set_custom_labels' function
             "enable_semantic_files_types": get_settings().pr_description.enable_semantic_files_types,
             "related_tickets": "",
-            "include_file_summary_changes": len(self.git_provider.get_diff_files()) <= self.COLLAPSIBLE_FILE_LIST_THRESHOLD,
+            "include_file_summary_changes": True,  # Will be calculated in run()
             "duplicate_prompt_examples": get_settings().config.get("duplicate_prompt_examples", False),
             "enable_pr_diagram": enable_pr_diagram,
         }
@@ -101,6 +101,10 @@ class PRDescription:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 self.git_provider.publish_comment("Preparing PR description...", is_temporary=True)
 
+            # Calculate include_file_summary_changes
+            diff_files = await self.git_provider.get_diff_files()
+            self.vars["include_file_summary_changes"] = len(diff_files) <= self.COLLAPSIBLE_FILE_LIST_THRESHOLD
+
             # ticket extraction if exists
             await extract_and_cache_pr_tickets(self.git_provider, self.vars)
 
@@ -123,9 +127,9 @@ class PRDescription:
                 get_logger().debug(f"Publishing labels disabled")
 
             if get_settings().pr_description.use_description_markers:
-                pr_title, pr_body, changes_walkthrough, pr_file_changes = self._prepare_pr_answer_with_markers()
+                pr_title, pr_body, changes_walkthrough, pr_file_changes = await self._prepare_pr_answer_with_markers()
             else:
-                pr_title, pr_body, changes_walkthrough, pr_file_changes = self._prepare_pr_answer()
+                pr_title, pr_body, changes_walkthrough, pr_file_changes = await self._prepare_pr_answer()
                 if not self.git_provider.is_supported(
                         "publish_file_comments") or not get_settings().pr_description.inline_file_summary:
                     pr_body += "\n\n" + changes_walkthrough + "___\n\n"
@@ -337,7 +341,7 @@ class PRDescription:
                 filenames_predicted = []
 
             # extend the prediction with additional files not included in the original prediction
-            pr_files = self.git_provider.get_diff_files()
+            pr_files = await self.git_provider.get_diff_files()
             prediction_extra = "pr_files:"
             MAX_EXTRA_FILES_TO_OUTPUT = 100
             counter_extra_files = 0
@@ -495,7 +499,7 @@ class PRDescription:
             get_logger().error(f"Error converting labels to original case {self.pr_id}: {e}")
         return pr_labels
 
-    def _prepare_pr_answer_with_markers(self) -> Tuple[str, str, str, List[dict]]:
+    async def _prepare_pr_answer_with_markers(self) -> Tuple[str, str, str, List[dict]]:
         get_logger().info(f"Using description marker replacements {self.pr_id}")
 
         # Remove the 'PR Title' key from the dictionary
@@ -532,7 +536,7 @@ class PRDescription:
         pr_file_changes = []
         if ai_walkthrough and not re.search(r'<!--\s*pr_agent:walkthrough\s*-->', body):
             try:
-                walkthrough_gfm, pr_file_changes = self.process_pr_files_prediction(walkthrough_gfm,
+                walkthrough_gfm, pr_file_changes = await self.process_pr_files_prediction(walkthrough_gfm,
                                                                                     self.file_label_dict)
                 body = body.replace('pr_agent:walkthrough', walkthrough_gfm)
             except Exception as e:
@@ -546,7 +550,7 @@ class PRDescription:
 
         return title, body, walkthrough_gfm, pr_file_changes
 
-    def _prepare_pr_answer(self) -> Tuple[str, str, str, List[dict]]:
+    async def _prepare_pr_answer(self) -> Tuple[str, str, str, List[dict]]:
         """
         Prepare the PR description based on the AI prediction data.
 
@@ -599,7 +603,7 @@ class PRDescription:
                 if self.git_provider.is_supported("gfm_markdown"):
                     pr_body += "</details>\n"
             elif 'pr_files' in key.lower() and get_settings().pr_description.enable_semantic_files_types: # 'File Walkthrough' section
-                changes_walkthrough_table, pr_file_changes = self.process_pr_files_prediction(changes_walkthrough, value)
+                changes_walkthrough_table, pr_file_changes = await self.process_pr_files_prediction(changes_walkthrough, value)
                 if get_settings().pr_description.get('file_table_collapsible_open_by_default', False):
                     initial_status = " open"
                 else:
@@ -656,7 +660,7 @@ class PRDescription:
                 pass
         return file_label_dict
 
-    def process_pr_files_prediction(self, pr_body, value):
+    async def process_pr_files_prediction(self, pr_body, value):
         pr_comments = []
         # logic for using collapsible file list
         use_collapsible_file_list = get_settings().pr_description.collapsible_file_list
@@ -698,7 +702,7 @@ class PRDescription:
                         filename_publish = f"<strong>{filename_publish}</strong>"
                     diff_plus_minus = ""
                     delta_nbsp = ""
-                    diff_files = self.git_provider.get_diff_files()
+                    diff_files = await self.git_provider.get_diff_files()
                     for f in diff_files:
                         if f.filename.lower().strip('/') == filename.lower().strip('/'):
                             num_plus_lines = f.num_plus_lines

@@ -238,7 +238,7 @@ class BitbucketServerGitProvider(GitProvider):
         diffstat = [change["path"]['toString'] for change in changes]
         return diffstat
 
-    def get_file_from_git(self, path: str, commit_id: str, repo_path: str) -> str:
+    async def get_file_from_git(self, path: str, commit_id: str, repo_path: str) -> str:
         """
         Read file content from local git repository using git show command.
         This bypasses REST API calls and avoids rate limiting.
@@ -252,17 +252,19 @@ class BitbucketServerGitProvider(GitProvider):
             File content as string, empty string if file not found
         """
         try:
-            result = subprocess.run(
+            from pr_agent.git_providers.git_provider import run_subprocess_with_output
+
+            result = await run_subprocess_with_output(
                 ['git', 'show', f'{commit_id}:{path}'],
                 cwd=repo_path,
-                capture_output=True,
-                text=True,
+                check=False,
                 timeout=30
             )
             if result.returncode == 0:
-                return result.stdout
+                return result.stdout.decode('utf-8') if isinstance(result.stdout, bytes) else result.stdout
             else:
-                get_logger().debug(f"File {path} not found at commit {commit_id}: {result.stderr}")
+                stderr_str = result.stderr.decode('utf-8') if isinstance(result.stderr, bytes) else result.stderr
+                get_logger().debug(f"File {path} not found at commit {commit_id}: {stderr_str}")
                 return ""
         except subprocess.TimeoutExpired:
             get_logger().warning(f"Timeout reading {path} from git at commit {commit_id}")
@@ -283,13 +285,13 @@ class BitbucketServerGitProvider(GitProvider):
 
         return guaranteed_common_ancestor
 
-    def get_diff_files(self) -> list[FilePatchInfo]:
+    async def get_diff_files(self) -> list[FilePatchInfo]:
         if self.diff_files:
             return self.diff_files
 
         # Custom: Use git clone mode if enabled (bypasses rate limits)
         if get_settings().get("bitbucket_server.use_git_clone_for_files", False):
-            return self._get_diff_files_with_git_clone()
+            return await self._get_diff_files_with_git_clone()
 
         # Original code continues below (unchanged for easier upstream merges)
         head_sha = self.pr.fromRef['latestCommit']
@@ -368,7 +370,7 @@ class BitbucketServerGitProvider(GitProvider):
         self.diff_files = diff_files
         return diff_files
 
-    def _get_diff_files_with_git_clone(self) -> list[FilePatchInfo]:
+    async def _get_diff_files_with_git_clone(self) -> list[FilePatchInfo]:
         """
         Hybrid approach: REST API for metadata + Git clone for file contents.
 
@@ -398,7 +400,7 @@ class BitbucketServerGitProvider(GitProvider):
         get_logger().info(f"Cloning repository: {repo_url}")
 
         with TemporaryDirectory() as tmp_dir:
-            cloned_repo = self.clone(repo_url, tmp_dir, remove_dest_folder=False)
+            cloned_repo = await self.clone(repo_url, tmp_dir, remove_dest_folder=False)
             if not cloned_repo:
                 get_logger().error("Git clone failed")
                 raise RuntimeError(f"Git clone mode enabled but clone failed for repo: {repo_url}")
@@ -459,12 +461,13 @@ class BitbucketServerGitProvider(GitProvider):
             get_logger().info(f"Fetching commits for file access: {base_sha[:8]} and {head_sha[:8]}")
             ssl_env = get_git_ssl_env()
             try:
+                from pr_agent.git_providers.git_provider import run_subprocess_with_output
+
                 # Fetch both commits in one batch for efficiency
-                subprocess.run(
+                await run_subprocess_with_output(
                     ['git', 'fetch', '--depth=1', 'origin', head_sha, base_sha],
                     cwd=repo_path,
                     env=ssl_env,
-                    capture_output=True,
                     check=True,
                     timeout=60
                 )
@@ -496,21 +499,21 @@ class BitbucketServerGitProvider(GitProvider):
                 match change['type']:
                     case 'ADD':
                         edit_type = EDIT_TYPE.ADDED
-                        new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
+                        new_file_content_str = await self.get_file_from_git(file_path, head_sha, repo_path)
                         new_file_content_str = decode_if_bytes(new_file_content_str)
                         original_file_content_str = ""
                     case 'DELETE':
                         edit_type = EDIT_TYPE.DELETED
                         new_file_content_str = ""
-                        original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
+                        original_file_content_str = await self.get_file_from_git(file_path, base_sha, repo_path)
                         original_file_content_str = decode_if_bytes(original_file_content_str)
                     case 'RENAME':
                         edit_type = EDIT_TYPE.RENAMED
                     case _:
                         edit_type = EDIT_TYPE.MODIFIED
-                        original_file_content_str = self.get_file_from_git(file_path, base_sha, repo_path)
+                        original_file_content_str = await self.get_file_from_git(file_path, base_sha, repo_path)
                         original_file_content_str = decode_if_bytes(original_file_content_str)
-                        new_file_content_str = self.get_file_from_git(file_path, head_sha, repo_path)
+                        new_file_content_str = await self.get_file_from_git(file_path, head_sha, repo_path)
                         new_file_content_str = decode_if_bytes(new_file_content_str)
 
                 patch = load_large_diff(file_path, new_file_content_str, original_file_content_str, show_warning=False)
@@ -775,7 +778,9 @@ class BitbucketServerGitProvider(GitProvider):
 
     #Overriding the shell command, since for some reason usage of x-token-auth doesn't work, as mentioned here:
     # https://stackoverflow.com/questions/56760396/cloning-bitbucket-server-repo-with-access-tokens
-    def _clone_inner(self, repo_url: str, dest_folder: str, operation_timeout_in_seconds: int=None):
+    async def _clone_inner(self, repo_url: str, dest_folder: str, operation_timeout_in_seconds: int=None):
+        from pr_agent.git_providers.git_provider import run_subprocess_async
+
         bearer_token = self.bearer_token
         if not bearer_token:
             #Shouldn't happen since this is checked in _prepare_clone, therefore - throwing an exception.
@@ -786,5 +791,4 @@ class BitbucketServerGitProvider(GitProvider):
 
         ssl_env = get_git_ssl_env()
 
-        subprocess.run(cli_args, env=ssl_env, check=True,  # check=True will raise an exception if the command fails
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=operation_timeout_in_seconds)
+        await run_subprocess_async(cli_args, env=ssl_env, check=True, timeout=operation_timeout_in_seconds)

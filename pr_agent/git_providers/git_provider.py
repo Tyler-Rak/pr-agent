@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
 # enum EDIT_TYPE (ADDED, DELETED, MODIFIED, RENAMED)
+import asyncio
 import os
 import shutil
 import subprocess
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 
 from pr_agent.algo.types import FilePatchInfo
 from pr_agent.algo.utils import Range, process_description
@@ -11,6 +12,92 @@ from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
 MAX_FILES_ALLOWED_FULL = 50
+
+
+async def run_subprocess_async(
+    args: List[str],
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+    check: bool = True,
+    cwd: Optional[str] = None
+) -> subprocess.CompletedProcess:
+    """
+    Run subprocess asynchronously to prevent blocking the event loop.
+    Uses asyncio.create_subprocess_exec for true non-blocking execution.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        env=env,
+        cwd=cwd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL
+    )
+
+    try:
+        if timeout:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        else:
+            await process.wait()
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise subprocess.TimeoutExpired(args, timeout)
+
+    if check and process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, args)
+
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=process.returncode,
+        stdout=None,
+        stderr=None
+    )
+
+
+async def run_subprocess_with_output(
+    args: List[str],
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+    check: bool = True,
+    cwd: Optional[str] = None
+) -> subprocess.CompletedProcess:
+    """
+    Run subprocess asynchronously and capture stdout/stderr.
+    Uses asyncio.create_subprocess_exec for true non-blocking execution.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        env=env,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    try:
+        if timeout:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout
+            )
+        else:
+            stdout, stderr = await process.communicate()
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise subprocess.TimeoutExpired(args, timeout)
+
+    if check and process.returncode != 0:
+        raise subprocess.CalledProcessError(
+            process.returncode, args, stdout, stderr
+        )
+
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr
+    )
+
 
 def get_git_ssl_env() -> dict[str, str]:
     """
@@ -136,7 +223,7 @@ class GitProvider(ABC):
     CLONE_TIMEOUT_SEC = 20
     # Clone a given url to a destination folder. If successful, returns an object that wraps the destination folder,
     # deleting it once it is garbage collected. See: GitProvider.ScopedClonedRepo for more details.
-    def clone(self, repo_url_to_clone: str, dest_folder: str, remove_dest_folder: bool = True,
+    async def clone(self, repo_url_to_clone: str, dest_folder: str, remove_dest_folder: bool = True,
               operation_timeout_in_seconds: int=CLONE_TIMEOUT_SEC) -> ScopedClonedRepo|None:
         returned_obj = None
         clone_url = self._prepare_clone_url_with_token(repo_url_to_clone)
@@ -146,7 +233,7 @@ class GitProvider(ABC):
         try:
             if remove_dest_folder and os.path.exists(dest_folder) and os.path.isdir(dest_folder):
                 shutil.rmtree(dest_folder)
-            self._clone_inner(clone_url, dest_folder, operation_timeout_in_seconds)
+            await self._clone_inner(clone_url, dest_folder, operation_timeout_in_seconds)
             returned_obj = GitProvider.ScopedClonedRepo(dest_folder)
         except Exception as e:
             get_logger().exception(f"Clone failed: Could not clone url.",
@@ -159,7 +246,7 @@ class GitProvider(ABC):
         pass
 
     @abstractmethod
-    def get_diff_files(self) -> list[FilePatchInfo]:
+    async def get_diff_files(self) -> list[FilePatchInfo]:
         pass
 
     def get_incremental_commits(self, is_incremental):
