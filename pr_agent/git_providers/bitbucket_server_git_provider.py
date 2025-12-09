@@ -30,10 +30,10 @@ class BitbucketServerGitProvider(GitProvider):
     1. Merge-base calculation: REST API (2-3 calls with limit=100)
        - Bitbucket 8.16+: Direct merge-base API
        - Bitbucket < 8.16: get_pull_requests_commits + get_commits + calculate
-    2. Git clone: Shallow clone with --filter=blob:none --depth=1
-    3. Fetch commits: git fetch --depth=1 for head_sha + base_sha
+    2. Git clone: Shallow clone with --depth=1 (includes blobs)
+    3. Fetch commits: git fetch --depth=1 for head_sha + base_sha (includes blobs)
     4. Changed files list: REST API get_pull_requests_changes (1 call)
-    5. File contents: git show {sha}:{path} (0 API calls, on-demand blob fetch)
+    5. File contents: git show {sha}:{path} (0 API calls, local disk read)
 
     PERFORMANCE:
     - REST API calls: 3-4 per PR (vs 25+ with full REST API)
@@ -373,11 +373,11 @@ class BitbucketServerGitProvider(GitProvider):
         Hybrid approach: REST API for metadata + Git clone for file contents.
 
         Flow:
-        1. Clone repo (shallow, no blobs): git clone --filter=blob:none --depth=1
+        1. Clone repo (shallow): git clone --depth=1 (includes blobs)
         2. Get merge-base via REST API (2-3 calls, limit=100)
-        3. Fetch needed commits: git fetch --depth=1 {head_sha} {base_sha}
+        3. Fetch needed commits: git fetch --depth=1 {head_sha} {base_sha} (includes blobs)
         4. Get changed files via REST API (1 call)
-        5. Get file contents via git: git show {sha}:{path} (0 API calls)
+        5. Get file contents via git: git show {sha}:{path} (0 API calls, local disk read)
 
         Total: 3-4 REST API calls per PR (vs 25+ with full REST API approach)
         """
@@ -782,7 +782,7 @@ class BitbucketServerGitProvider(GitProvider):
             raise RuntimeError(f"Bearer token is required!")
 
         cli_args = shlex.split(f"git clone -c http.extraHeader='Authorization: Bearer {bearer_token}' "
-                               f"--filter=blob:none --depth 1 {repo_url} {dest_folder}")
+                               f"--depth 1 {repo_url} {dest_folder}")
 
         ssl_env = get_git_ssl_env()
 
