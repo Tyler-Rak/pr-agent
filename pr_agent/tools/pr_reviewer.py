@@ -157,7 +157,7 @@ class PRReviewer:
                 self.git_provider.remove_initial_comment()
                 return None
 
-            pr_review = self._prepare_pr_review()
+            pr_review = await self._prepare_pr_review()
             get_logger().debug(f"PR output", artifact=pr_review)
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -226,7 +226,7 @@ class PRReviewer:
 
         return response
 
-    def _prepare_pr_review(self) -> str:
+    async def _prepare_pr_review(self) -> str:
         """
         Prepare the PR review by processing the AI prediction and generating a markdown-formatted text that summarizes
         the feedback.
@@ -258,7 +258,7 @@ class PRReviewer:
         markdown_text = convert_to_markdown_v2(data, self.git_provider.is_supported("gfm_markdown"),
                                             incremental_review_markdown_text,
                                                git_provider=self.git_provider,
-                                               files=self.git_provider.get_diff_files())
+                                               files=await self.git_provider.get_diff_files())
 
         # Add help text if gfm_markdown is supported
         if self.git_provider.is_supported("gfm_markdown") and get_settings().pr_reviewer.enable_help_text:

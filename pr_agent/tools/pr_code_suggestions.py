@@ -459,7 +459,7 @@ class PRCodeSuggestions:
                     suggestion["score"] = 7
                     suggestion["score_why"] = ""
 
-                suggestion = self.validate_one_liner_suggestion_not_repeating_code(suggestion)
+                suggestion = await self.validate_one_liner_suggestion_not_repeating_code(suggestion)
 
                 # if the before and after code is the same, clear one of them
                 try:
@@ -559,7 +559,7 @@ class PRCodeSuggestions:
                 label = d['label'].strip()
 
                 if new_code_snippet:
-                    new_code_snippet = self.dedent_code(relevant_file, relevant_lines_start, new_code_snippet)
+                    new_code_snippet = await self.dedent_code(relevant_file, relevant_lines_start, new_code_snippet)
 
                 if d.get('score'):
                     body = f"**Suggestion:** {content} [{label}, importance: {d.get('score')}]\n```suggestion\n" + new_code_snippet + "\n```"
@@ -578,10 +578,12 @@ class PRCodeSuggestions:
             for code_suggestion in code_suggestions:
                 self.git_provider.publish_code_suggestions([code_suggestion])
 
-    def dedent_code(self, relevant_file, relevant_lines_start, new_code_snippet):
+    async def dedent_code(self, relevant_file, relevant_lines_start, new_code_snippet):
         try:  # dedent code snippet
-            self.diff_files = self.git_provider.diff_files if self.git_provider.diff_files \
-                else self.git_provider.get_diff_files()
+            if self.git_provider.diff_files:
+                self.diff_files = self.git_provider.diff_files
+            else:
+                self.diff_files = await self.git_provider.get_diff_files()
             original_initial_line = None
             for file in self.diff_files:
                 if file.filename.strip() == relevant_file:
@@ -618,7 +620,7 @@ class PRCodeSuggestions:
 
         return new_code_snippet
 
-    def validate_one_liner_suggestion_not_repeating_code(self, suggestion):
+    async def validate_one_liner_suggestion_not_repeating_code(self, suggestion):
         try:
             existing_code = suggestion.get('existing_code', '').strip()
             if '...' in existing_code:
@@ -626,7 +628,7 @@ class PRCodeSuggestions:
             new_code = suggestion.get('improved_code', '').strip()
 
             relevant_file = suggestion.get('relevant_file', '').strip()
-            diff_files = self.git_provider.get_diff_files()
+            diff_files = await self.git_provider.get_diff_files()
             for file in diff_files:
                 if file.filename.strip() == relevant_file:
                     # protections
