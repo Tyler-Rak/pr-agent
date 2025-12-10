@@ -21,6 +21,10 @@ from ..config_loader import get_settings
 from ..log import get_logger
 from .git_provider import GitProvider, get_git_ssl_env
 
+# API pagination limit for get_pull_requests_changes
+# Bitbucket Server default is 25, but higher values (500+) significantly reduce API calls
+CHANGES_API_PAGE_LIMIT = 500
+
 
 class BitbucketServerGitProvider(GitProvider):
     """
@@ -32,7 +36,7 @@ class BitbucketServerGitProvider(GitProvider):
        - Bitbucket < 8.16: get_pull_requests_commits + get_commits + calculate
     2. Git clone: Shallow clone with --depth=1 (includes blobs)
     3. Fetch commits: git fetch --depth=1 for head_sha + base_sha (includes blobs)
-    4. Changed files list: REST API get_pull_requests_changes (1 call)
+    4. Changed files list: REST API get_pull_requests_changes (1-2 calls, limit=500)
     5. File contents: git show {sha}:{path} (0 API calls, local disk read)
 
     PERFORMANCE:
@@ -234,7 +238,7 @@ class BitbucketServerGitProvider(GitProvider):
         return file_content
 
     def get_files(self):
-        changes = self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num)
+        changes = self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num, limit=CHANGES_API_PAGE_LIMIT)
         diffstat = [change["path"]['toString'] for change in changes]
         return diffstat
 
@@ -325,7 +329,7 @@ class BitbucketServerGitProvider(GitProvider):
         original_file_content_str = ""
         new_file_content_str = ""
 
-        changes_original = list(self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num))
+        changes_original = list(self.bitbucket_client.get_pull_requests_changes(self.workspace_slug, self.repo_slug, self.pr_num, limit=CHANGES_API_PAGE_LIMIT))
         changes = filter_ignored(changes_original, 'bitbucket_server')
         for change in changes:
             file_path = change['path']['toString']
@@ -376,10 +380,10 @@ class BitbucketServerGitProvider(GitProvider):
         1. Clone repo (shallow): git clone --depth=1 (includes blobs)
         2. Get merge-base via REST API (2-3 calls, limit=100)
         3. Fetch needed commits: git fetch --depth=1 {head_sha} {base_sha} (includes blobs)
-        4. Get changed files via REST API (1 call)
+        4. Get changed files via REST API (1-2 calls, limit=500)
         5. Get file contents via git: git show {sha}:{path} (0 API calls, local disk read)
 
-        Total: 3-4 REST API calls per PR (vs 25+ with full REST API approach)
+        Total: 3-5 REST API calls per PR (vs 25+ with full REST API approach)
         """
         # Get repo clone URL
         try:
@@ -479,7 +483,8 @@ class BitbucketServerGitProvider(GitProvider):
                 changes_original = list(self.bitbucket_client.get_pull_requests_changes(
                     self.workspace_slug,
                     self.repo_slug,
-                    self.pr_num
+                    self.pr_num,
+                    limit=CHANGES_API_PAGE_LIMIT
                 ))
                 get_logger().info(f"Found {len(changes_original)} changed files")
             except Exception as e:
