@@ -325,11 +325,7 @@ async def handle_webhook_parallel(request: Request):
                 queue_depth = len(active_review_tasks)
 
             get_logger().info(
-                "Review task created",
-                event="review_task_created",
-                task_id=task_id,
-                pr_url=pr_url,
-                queue_depth=queue_depth,
+                f"Review task created: event=review_task_created task_id={task_id} queue_depth={queue_depth} pr_url={pr_url}",
                 **log_context_copy
             )
 
@@ -347,13 +343,7 @@ async def handle_webhook_parallel(request: Request):
                         waiting_tasks = len([t for t in active_review_tasks.values() if t["status"] == "waiting"])
 
                     get_logger().info(
-                        "Review task processing",
-                        event="review_task_processing",
-                        task_id=task_id,
-                        pr_url=pr_url,
-                        wait_time_seconds=round(wait_time, 2),
-                        active_reviews=active_tasks,
-                        waiting_reviews=waiting_tasks,
+                        f"Review task processing: event=review_task_processing task_id={task_id} wait_time_seconds={round(wait_time, 2)} active_reviews={active_tasks} waiting_reviews={waiting_tasks} pr_url={pr_url}",
                         **log_context_copy
                     )
 
@@ -367,11 +357,7 @@ async def handle_webhook_parallel(request: Request):
                 if task_id in active_review_tasks:
                     active_review_tasks[task_id]["status"] = "failed"
             get_logger().error(
-                "Review task failed",
-                event="review_task_failed",
-                task_id=task_id,
-                pr_url=pr_url,
-                error=str(e),
+                f"Review task failed: event=review_task_failed task_id={task_id} error={str(e)} pr_url={pr_url}",
                 **log_context_copy
             )
         finally:
@@ -383,13 +369,7 @@ async def handle_webhook_parallel(request: Request):
                 remaining_tasks = len(active_review_tasks)
 
             get_logger().info(
-                "Review task completed",
-                event="review_task_completed",
-                task_id=task_id,
-                pr_url=pr_url,
-                duration_seconds=round(duration, 2),
-                status=status,
-                remaining_tasks=remaining_tasks,
+                f"Review task completed: event=review_task_completed task_id={task_id} duration_seconds={round(duration, 2)} status={status} remaining_tasks={remaining_tasks} pr_url={pr_url}",
                 **log_context_copy
             )
 
