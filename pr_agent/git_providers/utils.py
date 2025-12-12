@@ -39,9 +39,12 @@ def get_bitbucket_server_credentials(pr_url: str) -> Tuple[Optional[str], Option
             instances_config = get_settings().get("BITBUCKET_SERVER_INSTANCES", {})
             if hostname in instances_config:
                 server_config = instances_config[hostname]
-                bearer_token = server_config.get("bearer_token")
-                username = server_config.get("username")
-                password = server_config.get("password")
+
+                # Support both direct values and environment variable names
+                bearer_token = server_config.get("bearer_token") or get_settings().get(server_config.get("bearer_token_env"))
+                username = server_config.get("username") or get_settings().get(server_config.get("username_env"))
+                password = server_config.get("password") or get_settings().get(server_config.get("password_env"))
+
                 get_logger().debug(f"Using multi-server credentials for {hostname}")
                 return bearer_token, username, password
         except Exception as e:
