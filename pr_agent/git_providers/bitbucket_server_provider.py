@@ -37,10 +37,11 @@ class BitbucketServerProvider(GitProvider):
         self.incremental = incremental
         self.diff_files = None
         self.bitbucket_pull_request_api_url = pr_url
-        self.bearer_token = get_settings().get("BITBUCKET_SERVER.BEARER_TOKEN", None)
-        # Get username and password from settings
-        username = get_settings().get("BITBUCKET_SERVER.USERNAME", None)
-        password = get_settings().get("BITBUCKET_SERVER.PASSWORD", None)
+
+        # Get credentials using shared helper function
+        from pr_agent.git_providers.utils import get_bitbucket_server_credentials
+        self.bearer_token, username, password = get_bitbucket_server_credentials(pr_url)
+
         if bitbucket_client: # if Bitbucket client is provided, use it
             self.bitbucket_client = bitbucket_client
             self.bitbucket_server_url = getattr(bitbucket_client, 'url', None) or self._parse_bitbucket_server(pr_url)
@@ -48,7 +49,7 @@ class BitbucketServerProvider(GitProvider):
             self.bitbucket_server_url = self._parse_bitbucket_server(pr_url)
             if not self.bitbucket_server_url:
                 raise ValueError("Invalid or missing Bitbucket Server URL parsed from PR URL.")
-            
+
             if self.bearer_token:  # if bearer token is provided, use it
                 self.bitbucket_client = Bitbucket(
                     url=self.bitbucket_server_url,

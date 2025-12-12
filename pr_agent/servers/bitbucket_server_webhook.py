@@ -5,7 +5,8 @@ import json
 import os
 import re
 import time
-from typing import List
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import APIRouter, FastAPI
@@ -34,6 +35,72 @@ review_semaphore = None
 # Task tracking for queue monitoring
 active_review_tasks = {}
 active_review_tasks_lock = asyncio.Lock()
+
+
+def get_hostname_from_webhook(data: dict) -> Optional[str]:
+    """
+    Extract the Bitbucket Server hostname from webhook payload.
+
+    Args:
+        data: Webhook payload
+
+    Returns:
+        Hostname (e.g., "git.rakuten-it.com") or None if not found
+    """
+    try:
+        # Extract from repository self link
+        repo_link = data["pullRequest"]["toRef"]["repository"]["links"]["self"][0]["href"]
+        # Example: "https://git.rakuten-it.com/projects/TRV/repos/repo"
+        hostname = urlparse(repo_link).netloc
+        return hostname
+    except (KeyError, IndexError, TypeError) as e:
+        get_logger().warning(f"Failed to extract hostname from webhook payload: {e}")
+        return None
+
+
+def get_server_config(hostname: Optional[str] = None) -> Dict[str, any]:
+    """
+    Get server configuration (URL, credentials) for a specific Bitbucket Server instance.
+
+    Supports two modes:
+    1. Multi-server: [BITBUCKET_SERVER_INSTANCES] with per-server config
+       - URL is constructed from hostname: https://{hostname}
+    2. Single-server (legacy): [BITBUCKET_SERVER] with global config
+       - URL must be explicitly provided
+
+    Args:
+        hostname: Server hostname (e.g., "git.rakuten-it.com")
+
+    Returns:
+        Dict with 'url', 'bearer_token', 'username', 'password', 'webhook_secret'
+    """
+    # Try multi-server configuration
+    if hostname:
+        instances_config = get_settings().get("BITBUCKET_SERVER_INSTANCES", {})
+        if hostname in instances_config:
+            server_config = instances_config[hostname]
+            get_logger().debug(f"Using multi-server config for {hostname}")
+
+            # URL is always constructed from hostname in multi-server mode
+            url = f"https://{hostname}"
+
+            return {
+                "url": url,
+                "bearer_token": server_config.get("bearer_token"),
+                "username": server_config.get("username"),
+                "password": server_config.get("password"),
+                "webhook_secret": server_config.get("webhook_secret")
+            }
+
+    # Fallback to legacy single-server configuration
+    get_logger().debug("Using legacy single-server configuration")
+    return {
+        "url": get_settings().get("BITBUCKET_SERVER.URL"),
+        "bearer_token": get_settings().get("BITBUCKET_SERVER.BEARER_TOKEN"),
+        "username": get_settings().get("BITBUCKET_SERVER.USERNAME"),
+        "password": get_settings().get("BITBUCKET_SERVER.PASSWORD"),
+        "webhook_secret": get_settings().get("BITBUCKET_SERVER.WEBHOOK_SECRET")
+    }
 
 
 def handle_request(
@@ -113,7 +180,10 @@ def should_process_pr_logic(data) -> bool:
         allowed_folders = get_settings().config.get("allow_only_specific_folders", [])
         if allowed_folders and pr_id and project_key and repo_slug:
             from pr_agent.git_providers.bitbucket_server_provider import BitbucketServerProvider
-            bitbucket_server_url = get_settings().get("BITBUCKET_SERVER.URL", "")
+            # Extract hostname and get server URL
+            hostname = get_hostname_from_webhook(data)
+            server_config = get_server_config(hostname)
+            bitbucket_server_url = server_config.get("url", "")
             pr_url = f"{bitbucket_server_url}/projects/{project_key}/repos/{repo_slug}/pull-requests/{pr_id}"
             provider = BitbucketServerProvider(pr_url=pr_url)
             changed_files = provider.get_files()
@@ -143,7 +213,11 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
     data = await request.json()
     get_logger().info(json.dumps(data))
 
-    webhook_secret = get_settings().get("BITBUCKET_SERVER.WEBHOOK_SECRET", None)
+    # Extract hostname and get server-specific configuration
+    hostname = get_hostname_from_webhook(data)
+    server_config = get_server_config(hostname)
+
+    webhook_secret = server_config.get("webhook_secret")
     if webhook_secret:
         body_bytes = await request.body()
         if body_bytes.decode('utf-8') == '{"test": true}':
@@ -156,7 +230,15 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
     pr_id = data["pullRequest"]["id"]
     repository_name = data["pullRequest"]["toRef"]["repository"]["slug"]
     project_name = data["pullRequest"]["toRef"]["repository"]["project"]["key"]
-    bitbucket_server = get_settings().get("BITBUCKET_SERVER.URL")
+    bitbucket_server = server_config.get("url")
+
+    if not bitbucket_server:
+        get_logger().error(f"Could not determine Bitbucket Server URL for hostname: {hostname}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=jsonable_encoder({"error": "Server URL not configured"})
+        )
+
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
     log_context["api_url"] = pr_url
@@ -237,8 +319,12 @@ async def handle_webhook_parallel(request: Request):
             review_semaphore = asyncio.Semaphore(max_concurrent)
             get_logger().info(f"Initialized review semaphore with max_concurrent_reviews={max_concurrent}")
 
+    # Extract hostname and get server-specific configuration
+    hostname = get_hostname_from_webhook(data)
+    server_config = get_server_config(hostname)
+
     # Webhook signature verification
-    webhook_secret = get_settings().get("BITBUCKET_SERVER.WEBHOOK_SECRET", None)
+    webhook_secret = server_config.get("webhook_secret")
     if webhook_secret:
         body_bytes = await request.body()
         if body_bytes.decode('utf-8') == '{"test": true}':
@@ -251,7 +337,15 @@ async def handle_webhook_parallel(request: Request):
     pr_id = data["pullRequest"]["id"]
     repository_name = data["pullRequest"]["toRef"]["repository"]["slug"]
     project_name = data["pullRequest"]["toRef"]["repository"]["project"]["key"]
-    bitbucket_server = get_settings().get("BITBUCKET_SERVER.URL")
+    bitbucket_server = server_config.get("url")
+
+    if not bitbucket_server:
+        get_logger().error(f"Could not determine Bitbucket Server URL for hostname: {hostname}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=jsonable_encoder({"error": "Server URL not configured"})
+        )
+
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
     log_context["api_url"] = pr_url

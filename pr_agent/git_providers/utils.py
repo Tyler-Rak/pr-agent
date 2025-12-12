@@ -2,6 +2,8 @@ import copy
 import os
 import tempfile
 import traceback
+from typing import Optional, Tuple
+from urllib.parse import urlparse
 
 from dynaconf import Dynaconf
 from starlette_context import context
@@ -9,6 +11,49 @@ from starlette_context import context
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import get_git_provider_with_context
 from pr_agent.log import get_logger
+
+
+def get_bitbucket_server_credentials(pr_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Get credentials for Bitbucket Server based on PR URL.
+
+    Supports multi-server configuration by extracting hostname from pr_url
+    and looking up server-specific credentials, with fallback to legacy config.
+
+    Args:
+        pr_url: The PR URL (e.g., "https://git.rakuten-it.com/projects/...")
+
+    Returns:
+        Tuple of (bearer_token, username, password)
+    """
+    bearer_token = None
+    username = None
+    password = None
+
+    if pr_url:
+        try:
+            parsed_url = urlparse(pr_url)
+            hostname = parsed_url.netloc
+
+            # Check for server-specific configuration
+            instances_config = get_settings().get("BITBUCKET_SERVER_INSTANCES", {})
+            if hostname in instances_config:
+                server_config = instances_config[hostname]
+                bearer_token = server_config.get("bearer_token")
+                username = server_config.get("username")
+                password = server_config.get("password")
+                get_logger().debug(f"Using multi-server credentials for {hostname}")
+                return bearer_token, username, password
+        except Exception as e:
+            get_logger().debug(f"Could not extract server-specific credentials from pr_url: {e}")
+
+    # Fallback to legacy single-server configuration
+    bearer_token = get_settings().get("BITBUCKET_SERVER.BEARER_TOKEN", None)
+    username = get_settings().get("BITBUCKET_SERVER.USERNAME", None)
+    password = get_settings().get("BITBUCKET_SERVER.PASSWORD", None)
+    get_logger().debug("Using legacy single-server credentials")
+
+    return bearer_token, username, password
 
 
 def apply_repo_settings(pr_url):
