@@ -40,6 +40,7 @@ active_review_tasks_lock = asyncio.Lock()
 def get_hostname_from_webhook(data: dict) -> Optional[str]:
     """
     Extract the Bitbucket Server hostname from webhook payload.
+    Supports both PR events and repository events.
 
     Args:
         data: Webhook payload
@@ -48,8 +49,15 @@ def get_hostname_from_webhook(data: dict) -> Optional[str]:
         Hostname (e.g., "git.rakuten-it.com") or None if not found
     """
     try:
-        # Extract from repository self link
-        repo_link = data["pullRequest"]["toRef"]["repository"]["links"]["self"][0]["href"]
+        # PR events: pr:opened, pr:comment:added, etc.
+        if "pullRequest" in data:
+            repo_link = data["pullRequest"]["toRef"]["repository"]["links"]["self"][0]["href"]
+        # Repository events: repo:refs_changed (when not PR-related)
+        elif "repository" in data:
+            repo_link = data["repository"]["links"]["self"][0]["href"]
+        else:
+            return None
+
         # Example: "https://git.rakuten-it.com/projects/TRV/repos/repo"
         hostname = urlparse(repo_link).netloc
         return hostname
