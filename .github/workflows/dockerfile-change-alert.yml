@@ -1,0 +1,114 @@
+name: Dockerfile Change Alert
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - release
+    paths:
+      - 'Dockerfile'
+      - 'docker/**'
+  workflow_dispatch:
+
+jobs:
+  create-sync-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get commit info
+        id: commit
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "author=$(git log -1 --pretty=%an)" >> $GITHUB_OUTPUT
+          echo "message=$(git log -1 --pretty=%B | head -1)" >> $GITHUB_OUTPUT
+          echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+
+      - name: Get Dockerfile diff
+        id: diff
+        run: |
+          DIFF=$(git diff HEAD^..HEAD -- Dockerfile)
+          echo "$DIFF" > /tmp/diff.txt
+
+          LINES_ADDED=$(echo "$DIFF" | grep "^+" | grep -v "^+++" | wc -l)
+          LINES_REMOVED=$(echo "$DIFF" | grep "^-" | grep -v "^---" | wc -l)
+
+          echo "lines_added=$LINES_ADDED" >> $GITHUB_OUTPUT
+          echo "lines_removed=$LINES_REMOVED" >> $GITHUB_OUTPUT
+
+          if [ $LINES_ADDED -gt 0 ] || [ $LINES_REMOVED -gt 0 ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Issue
+        if: steps.diff.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const diff = fs.readFileSync('/tmp/diff.txt', 'utf8');
+
+            const maxDiffLength = 5000;
+            const truncatedDiff = diff.length > maxDiffLength
+              ? diff.substring(0, maxDiffLength) + '\n\n... (diff truncated, view full diff in commit)'
+              : diff;
+
+            const branch = '${{ steps.commit.outputs.branch }}';
+            const branchEmoji = branch === 'main' || branch === 'master' ? '🔵' : '🟠';
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🔔 [${branch}] Dockerfile changed - Sync to caas-spec needed`,
+              body: `## ${branchEmoji} Dockerfile Modified on \`${branch}\` Branch
+
+            The Dockerfile has been updated and needs to be synced to caas-spec.
+
+            ### 📊 Change Summary
+            - **Branch:** \`${branch}\`
+            - **Commit:** [\`${{ steps.commit.outputs.short_sha }}\`](${{ github.event.head_commit.url }})
+            - **Author:** ${{ steps.commit.outputs.author }}
+            - **Message:** ${{ steps.commit.outputs.message }}
+            - **Changes:** +${{ steps.diff.outputs.lines_added }} / -${{ steps.diff.outputs.lines_removed }} lines
+
+            ---
+
+            ### 🔄 To Sync to caas-spec:
+
+            **One-liner:**
+            \`\`\`bash
+            cd ~/Documents/code/python/pr-agent && git checkout ${branch} && git pull && \\
+            cp Dockerfile ~/Documents/code/caas/caas-spec/app/pr-agent/docker/python.Dockerfile && \\
+            cd ~/Documents/code/caas/caas-spec && \\
+            git add app/pr-agent/docker/python.Dockerfile && \\
+            git commit -m "chore: sync Dockerfile from pr-agent ${branch} (${{ steps.commit.outputs.short_sha }})" && \\
+            git push
+            \`\`\`
+
+            ---
+
+            ### 📝 Dockerfile Changes
+
+            <details>
+            <summary>Click to view diff</summary>
+
+            \`\`\`diff
+            ${truncatedDiff}
+            \`\`\`
+
+            </details>
+
+            **Full commit:** ${{ github.event.head_commit.url }}
+
+            ---
+
+            ✅ **Close this issue after syncing**`,
+              labels: ['dockerfile-sync', 'maintenance']
+            });
