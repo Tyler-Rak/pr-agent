@@ -7,7 +7,6 @@ on:
       - master
       - release
     paths:
-      - 'Dockerfile'
       - 'docker/**'
   workflow_dispatch:
 
@@ -32,7 +31,7 @@ jobs:
       - name: Get Dockerfile diff
         id: diff
         run: |
-          DIFF=$(git diff HEAD^..HEAD -- Dockerfile)
+          DIFF=$(git diff HEAD^..HEAD -- docker/)
           echo "$DIFF" > /tmp/diff.txt
 
           LINES_ADDED=$(echo "$DIFF" | grep "^+" | grep -v "^+++" | wc -l)
@@ -85,10 +84,10 @@ jobs:
             **One-liner:**
             \`\`\`bash
             cd ~/Documents/code/python/pr-agent && git checkout ${branch} && git pull && \\
-            cp Dockerfile ~/Documents/code/caas/caas-spec/app/pr-agent/docker/python.Dockerfile && \\
+            cp docker/* ~/Documents/code/caas/caas-spec/app/pr-agent/docker/ && \\
             cd ~/Documents/code/caas/caas-spec && \\
-            git add app/pr-agent/docker/python.Dockerfile && \\
-            git commit -m "chore: sync Dockerfile from pr-agent ${branch} (${{ steps.commit.outputs.short_sha }})" && \\
+            git add app/pr-agent/docker/ && \\
+            git commit -m "chore: sync docker/ from pr-agent ${branch} (${{ steps.commit.outputs.short_sha }})" && \\
             git push
             \`\`\`
 
