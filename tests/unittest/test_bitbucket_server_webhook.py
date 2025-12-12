@@ -233,6 +233,36 @@ class TestMultiServerSupport:
         hostname = get_hostname_from_webhook(webhook_data)
         assert hostname is None
 
+    def test_get_hostname_from_webhook_repository_event(self):
+        """Test extracting hostname from repository event (not PR event)"""
+        webhook_data = {
+            "repository": {
+                "links": {
+                    "self": [
+                        {"href": "https://git.rakuten-it.com/projects/TEST/repos/repo"}
+                    ]
+                }
+            }
+        }
+
+        hostname = get_hostname_from_webhook(webhook_data)
+        assert hostname == "git.rakuten-it.com"
+
+    def test_get_hostname_from_webhook_repository_event_different_server(self):
+        """Test extracting hostname from repository event on different server"""
+        webhook_data = {
+            "repository": {
+                "links": {
+                    "self": [
+                        {"href": "https://gitpub.rakuten-it.com/projects/PROJ/repos/repo"}
+                    ]
+                }
+            }
+        }
+
+        hostname = get_hostname_from_webhook(webhook_data)
+        assert hostname == "gitpub.rakuten-it.com"
+
     @patch('pr_agent.servers.bitbucket_server_webhook.get_settings')
     def test_get_server_config_multi_server(self, mock_settings):
         """Test getting config for specific server in multi-server mode"""
