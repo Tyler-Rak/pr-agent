@@ -261,13 +261,13 @@ class BitbucketServerGitProvider(GitProvider):
                 ['git', 'show', f'{commit_id}:{path}'],
                 cwd=repo_path,
                 capture_output=True,
-                text=True,
                 timeout=30
             )
             if result.returncode == 0:
-                return result.stdout
+                return decode_if_bytes(result.stdout)
             else:
-                get_logger().debug(f"File {path} not found at commit {commit_id}: {result.stderr}")
+                stderr_text = result.stderr.decode('utf-8', errors='replace')
+                get_logger().debug(f"File {path} not found at commit {commit_id}: {stderr_text}")
                 return ""
         except subprocess.TimeoutExpired:
             get_logger().warning(f"Timeout reading {path} from git at commit {commit_id}")

@@ -36,7 +36,17 @@ def decode_if_bytes(original_file_str):
         try:
             return original_file_str.decode('utf-8')
         except UnicodeDecodeError:
-            encodings_to_try = ['iso-8859-1', 'latin-1', 'ascii', 'utf-16']
+            # Auto-detect encoding using charset-normalizer
+            try:
+                from charset_normalizer import from_bytes
+                result = from_bytes(original_file_str).best()
+                if result:
+                    return str(result)
+            except Exception:
+                pass
+            # Fallback to common encodings if detection fails
+            # Japanese encodings first, then original fallbacks
+            encodings_to_try = ['shift-jis', 'cp932', 'iso-8859-1', 'latin-1', 'ascii', 'utf-16']
             for encoding in encodings_to_try:
                 try:
                     return original_file_str.decode(encoding)
